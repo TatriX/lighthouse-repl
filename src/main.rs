@@ -1,76 +1,164 @@
 use lighthouse::{colors::*, state, HueBridge};
 use prettytable::{cell, row, Table};
-use std::thread::sleep;
-use std::time::Duration;
 
 use rustyline::error::ReadlineError;
 use rustyline::Editor;
 
-fn main() {
-    env_logger::init();
+use ansi_term::Color::*;
 
-    let mut h = HueBridge::connect();
-    let mut rl = Editor::<()>::new();
+mod loops;
 
-    let history_path = dirs::data_dir()
-        .unwrap_or_else(|| "./".into())
-        .with_file_name(".lhr_history");
+use loops::*;
 
-    // Ignore missing history
-    let _ = rl.load_history(&history_path);
-
-    let mut t = term::stdout().unwrap();
-
-    loop {
-        let readline = rl.readline(">> ");
-        match readline {
-            Ok(line) => {
-                if let Err(err) = process_line(&line, &h) {
-                    t.fg(term::color::RED).unwrap();
-                    println!("{}", err);
-                    t.reset().unwrap();
-                }
-                rl.add_history_entry(line.as_str());
-                {
-                    use lighthouse::*;
-                    let lights: std::collections::BTreeMap<u8, Light> = h
-                        .request("lights", RequestType::Get, None)
-                        .unwrap()
-                        .json()
-                        .unwrap();
-                    let ids: Vec<u8> = lights.keys().cloned().collect();
-                    let count = ids.len() as u8;
-
-                    h.lights = LightCollection { lights, ids, count };
-                }
-            }
-            Err(ReadlineError::Interrupted) => {
-                println!("Interrupted");
-            }
-            Err(ReadlineError::Eof) => {
-                println!("CTRL-D");
-                break;
-            }
-            Err(err) => {
-                println!("Error: {:?}", err);
-                break;
-            }
-        }
-    }
-    rl.save_history(&history_path).unwrap();
+struct Repl {
+    bridge: HueBridge,
+    loops: Vec<Box<dyn Loop>>,
 }
 
-fn process_line(line: &str, h: &HueBridge) -> Result<(), String> {
-    let words: Vec<_> = line.split_whitespace().collect();
-    Ok(match &words[..] {
-        ["ls"] => list_lights(h),
-        ["on", id] => light_set_on(parse_id(id)?, true, h),
-        ["off", id] => light_set_on(parse_id(id)?, false, h),
-        ["bri", id, bri] => light_set_bri(parse_id(id)?, parse_bri(bri)?, h),
-        ["rgb", id, r, g, b] => light_set_color(parse_id(id)?, parse_rgb(r, g, b)?, h),
-        ["play"] => play(h),
-        _ => Err(format!("Unknown command: {}", line))?,
-    })
+impl Repl {
+    fn new() -> Self {
+        Self {
+            loops: vec![],
+            bridge: HueBridge::connect(),
+        }
+    }
+
+    fn add_loop(mut self, l: impl Loop + 'static) -> Self {
+        self.loops.push(Box::new(l));
+        self
+    }
+
+    fn run(mut self) {
+        let mut rl = Editor::<()>::new();
+
+        let history_path = dirs::data_dir()
+            .unwrap_or_else(|| "./".into())
+            .with_file_name(".lhr_history");
+
+        // Ignore missing history
+        let _ = rl.load_history(&history_path);
+
+        loop {
+            let readline = rl.readline(">> ");
+
+            match readline {
+                Ok(line) => {
+                    if let Err(err) = self.process_line(&line) {
+                        println!("{}", Red.paint(err));
+                    }
+                    rl.add_history_entry(line.as_str());
+                    {
+                        use lighthouse::*;
+                        let lights: std::collections::BTreeMap<u8, Light> = self
+                            .bridge
+                            .request("lights", RequestType::Get, None)
+                            .unwrap()
+                            .json()
+                            .unwrap();
+                        let ids: Vec<u8> = lights.keys().cloned().collect();
+                        let count = ids.len() as u8;
+
+                        self.bridge.lights = LightCollection { lights, ids, count };
+                    }
+                }
+                Err(ReadlineError::Interrupted) => {
+                    println!("Interrupted");
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("CTRL-D");
+                    break;
+                }
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    break;
+                }
+            }
+        }
+
+        // TODO: move to Drop
+        rl.save_history(&history_path).unwrap();
+    }
+
+    fn process_line(&self, line: &str) -> Result<(), String> {
+        let words: Vec<_> = line.split_whitespace().collect();
+        Ok(match &words[..] {
+            ["ls"] => self.list_lights(),
+            ["on", id] => self.light_set_on(parse_id(id)?, true),
+            ["off", id] => self.light_set_on(parse_id(id)?, false),
+            ["bri", id, bri] => self.light_set_bri(parse_id(id)?, parse_bri(bri)?),
+            ["rgb", id, r, g, b] => self.light_set_color(parse_id(id)?, parse_rgb(r, g, b)?),
+            ["play", name] => self.play_loop(&name),
+            ["ls", "loops"] => self.list_loops(),
+            _ => Err(Yellow
+                .paint(format!("Unknown command: {}", Red.paint(line)))
+                .to_string())?,
+        })
+    }
+
+    fn list_lights(&self) {
+        let mut table = Table::new();
+        table.add_row(row!["id", "on", "name", "bri", "sat", "hue", "xy"]);
+        for (id, light) in &self.bridge.lights.lights {
+            let on = if light.state.on { "✓" } else { " " };
+            table.add_row(row![
+                id,
+                on,
+                light.name,
+                light.state.bri,
+                light.state.sat,
+                light.state.hue,
+                format!("{:?}", light.state.xy),
+            ]);
+        }
+        table.printstd();
+    }
+
+    fn light_set_on(&self, id: u8, on: bool) {
+        if on {
+            let bri = self.bridge.lights.lights[&id].state.bri;
+            log::debug!("[light_set_on]: setting bri of {} to {}", id, bri);
+            self.bridge
+                .state_by_ids(&[id], state!(on: on, bri: bri))
+                .unwrap();
+        } else {
+            self.bridge.state_by_ids(&[id], state!(on: false)).unwrap();
+        }
+    }
+
+    fn light_set_bri(&self, id: u8, bri: u8) {
+        log::debug!("[light_set_bri]: setting bri of {} to {}", id, bri);
+        self.bridge.state_by_ids(&[id], state!(bri: bri)).unwrap();
+    }
+
+    fn light_set_color(&self, id: u8, (r, g, b): (u8, u8, u8)) {
+        self.bridge
+            .state_by_ids(&[id], state!(xy: rgb_to_xy(r, g, b)))
+            .unwrap();
+    }
+
+    // Loops
+
+    fn play_loop(&self, name: &str) {
+        if let Some(l) = self.loops.iter().find(|l| l.name() == name) {
+            l.play(&self.bridge);
+        } else {
+            println!(
+                "{}",
+                Yellow.paint(format!("Loop {} not found", Red.paint(name)))
+            );
+        }
+    }
+
+    fn list_loops(&self) {
+        for l in &self.loops {
+            println!("- {}", l.name());
+        }
+    }
+}
+
+fn main() {
+    env_logger::init();
+    Repl::new().add_loop(TestLoop).run();
 }
 
 fn parse_id(s: &str) -> Result<u8, String> {
@@ -94,59 +182,4 @@ fn parse_rgb(r: &str, g: &str, b: &str) -> Result<(u8, u8, u8), String> {
         .parse()
         .map_err(|err| format!("cannot parse b: {:?}", err))?;
     Ok((r, g, b))
-}
-
-fn light_set_color(id: u8, (r, g, b): (u8, u8, u8), h: &HueBridge) {
-    h.state_by_ids(&[id], state!(xy: rgb_to_xy(r, g, b)))
-        .unwrap();
-}
-
-fn light_set_on(id: u8, on: bool, h: &HueBridge) {
-    if on {
-        let bri = h.lights.lights[&id].state.bri;
-        log::debug!("[light_set_on]: setting bri of {} to {}", id, bri);
-        h.state_by_ids(&[id], state!(on: on, bri: bri)).unwrap();
-    } else {
-        h.state_by_ids(&[id], state!(on: false)).unwrap();
-    }
-}
-
-fn light_set_bri(id: u8, bri: u8, h: &HueBridge) {
-    log::debug!("[light_set_bri]: setting bri of {} to {}", id, bri);
-    h.state_by_ids(&[id], state!(bri: bri)).unwrap();
-}
-
-fn list_lights(h: &HueBridge) {
-    let mut table = Table::new();
-    table.add_row(row!["id", "on", "name", "bri", "sat", "hue", "xy"]);
-    for (id, light) in &h.lights.lights {
-        let on = if light.state.on { "✓" } else { " " };
-        table.add_row(row![
-            id,
-            on,
-            light.name,
-            light.state.bri,
-            light.state.sat,
-            light.state.hue,
-            format!("{:?}", light.state.xy),
-        ]);
-    }
-    table.printstd();
-}
-
-fn play(h: &HueBridge) {
-    for i in (50..255).step_by(10) {
-        let r = 255 - i;
-        let g = i;
-        let b = ((i as u64 * (i as u64 + 3) / 42 as u64) % 255) as u8;
-        let dur = 3;
-        println!("Setting bri to {}, color to {:?}", i, (r, g, b));
-        h.state_by_ids(
-            &[2, 4],
-            state!(on: true, bri: i, xy: rgb_to_xy(r, g, b), transitiontime: dur),
-        )
-        .unwrap();
-
-        sleep(Duration::from_millis(dur as u64 * 1000));
-    }
 }
