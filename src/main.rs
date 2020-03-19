@@ -83,6 +83,8 @@ impl Repl {
         let words: Vec<_> = line.split_whitespace().collect();
         Ok(match &words[..] {
             ["ls"] => self.list_lights(),
+            ["all", "on"] => self.all_lights_set_on(true),
+            ["all", "off"] => self.all_lights_set_on(false),
             ["on", id] => self.light_set_on(parse_id(id)?, true),
             ["off", id] => self.light_set_on(parse_id(id)?, false),
             ["bri", id, bri] => self.light_set_bri(parse_id(id)?, parse_bri(bri)?),
@@ -123,6 +125,10 @@ impl Repl {
         } else {
             self.bridge.state_by_ids(&[id], state!(on: false)).unwrap();
         }
+    }
+
+    fn all_lights_set_on(&self, on: bool) {
+        self.bridge.all(state!(on: on)).unwrap();
     }
 
     fn light_set_bri(&self, id: u8, bri: u8) {
