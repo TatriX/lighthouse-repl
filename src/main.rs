@@ -89,7 +89,7 @@ impl Repl {
             ["off", id] => self.light_set_on(parse_id(id)?, false),
             ["bri", id, bri] => self.light_set_bri(parse_id(id)?, parse_bri(bri)?),
             ["rgb", id, r, g, b] => self.light_set_color(parse_id(id)?, parse_rgb(r, g, b)?),
-            ["play"] => self.play_loop(SoloHueLoop.name()),
+            ["play"] => self.play_loop(RandomHueLoop.name()),
             ["play", name] => self.play_loop(&name),
             ["ls", "loops"] => self.list_loops(),
             _ => Err(Yellow
@@ -165,7 +165,7 @@ impl Repl {
 
 fn main() {
     env_logger::init();
-    Repl::new().add_loop(TestLoop).add_loop(SoloHueLoop).run();
+    Repl::new().add_loop(TestLoop).add_loop(SoloHueLoop).add_loop(RandomHueLoop).run();
 }
 
 fn parse_id(s: &str) -> Result<u8, String> {
