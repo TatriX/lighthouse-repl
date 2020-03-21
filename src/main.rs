@@ -83,8 +83,8 @@ impl Repl {
         let words: Vec<_> = line.split_whitespace().collect();
         Ok(match &words[..] {
             ["ls"] => self.list_lights(),
-            ["all", "on"] => self.all_lights_set_on(true),
-            ["all", "off"] => self.all_lights_set_on(false),
+            ["on"] => self.all_lights_set_on(true),
+            ["off"] => self.all_lights_set_on(false),
             ["on", id] => self.light_set_on(parse_id(id)?, true),
             ["off", id] => self.light_set_on(parse_id(id)?, false),
             ["bri", id, bri] => self.light_set_bri(parse_id(id)?, parse_bri(bri)?),
